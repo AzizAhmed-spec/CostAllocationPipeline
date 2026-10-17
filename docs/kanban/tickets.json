@@ -1,0 +1,419 @@
+{
+  "project": "FinOps Cost Allocation Pipeline",
+  "goal": "Replace Apptio TBM Studio with an in-house cloud cost allocation and chargeback pipeline: Cloudability -> AWS Lambda -> S3 -> Databricks (Bronze/Silver/Gold) -> FOCUS v1.4 output -> API and Power BI, charging back 100% of cloud cost to portfolios and business units.",
+  "epics": [
+    {"key": "ARCH", "name": "Architecture & Discovery"},
+    {"key": "ING", "name": "Ingestion (Cloudability to S3)"},
+    {"key": "FOC", "name": "FOCUS Normalization"},
+    {"key": "MED", "name": "Databricks Medallion"},
+    {"key": "ALL", "name": "Allocation Engine"},
+    {"key": "API", "name": "API & Reporting"},
+    {"key": "OPS", "name": "Platform & Operations"},
+    {"key": "VAL", "name": "Validation & Cutover"}
+  ],
+  "tickets": [
+    {
+      "id": "FIN-1", "title": "Define cost group hierarchy and allocation rules", "epic": "ARCH", "status": "done", "priority": "High", "points": 3, "depends": [],
+      "description": "Document the five cost groups (Vendor Consumption Costs, Shared Costs at account level, Platform, Portfolio, Application) and the allocation order CSP -> Shared Costs -> Platform -> Portfolio -> Business Unit. This becomes the single source of truth the allocation engine is built against. State the cost neutrality principle: total cost in must equal total cost out after allocation.",
+      "acceptance": [
+        "Hierarchy diagram and cost group definitions published in Confluence",
+        "Each cost group has an owner, a definition and at least one worked example",
+        "Allocation order is agreed with the FinOps lead and recorded",
+        "Cost neutrality principle is written down as a testable rule"
+      ]
+    },
+    {
+      "id": "FIN-2", "title": "Evaluate Databricks vs Snowflake as the analysis platform", "epic": "ARCH", "status": "progress", "priority": "High", "points": 5, "depends": [],
+      "description": "Compare Databricks and Snowflake for this workload: PySpark support, Medallion fit, S3 integration, Power BI connectivity, security model, run cost at expected monthly volume, and operational effort. Produce a recommendation the team can approve and record as an architecture decision.",
+      "acceptance": [
+        "Weighted scoring matrix covering cost, PySpark support, S3 and Power BI integration, governance and ops effort",
+        "One month of FOCUS-shaped data loaded and queried on each platform, or a documented reason a platform was excluded",
+        "Monthly cost estimate for both options using realistic data volumes",
+        "Recommendation approved and saved as an architecture decision record in the repo"
+      ]
+    },
+    {
+      "id": "FIN-3", "title": "Write enterprise architecture blueprint", "epic": "ARCH", "status": "done", "priority": "Medium", "points": 5, "depends": ["FIN-1"],
+      "description": "Produce the architecture document covering the Medallion layers, the allocation and chargeback engines, the REST API layer, and the reporting layer. Include data flow, component responsibilities, non-functional requirements and open risks.",
+      "acceptance": [
+        "Document covers ingestion, Bronze/Silver/Gold, allocation engine, chargeback engine, API and Power BI layer",
+        "Data flow diagram shows every system boundary and file or table handoff",
+        "Non-functional requirements stated: freshness, reconciliation tolerance, availability, access control",
+        "Reviewed by the tech lead; open risks listed with owners"
+      ]
+    },
+    {
+      "id": "FIN-4", "title": "Map Cloudability fields to FOCUS v1.4", "epic": "FOC", "status": "done", "priority": "High", "points": 8, "depends": [],
+      "description": "Build the column-by-column mapping from the Cloudability v3 reporting output to the FOCUS v1.4 schema. Identify gaps where Cloudability does not supply a FOCUS field (for example ResourceId, Tags and SKU-level detail) and record the workaround or accepted limitation for each.",
+      "acceptance": [
+        "Every mandatory FOCUS v1.4 column is mapped, derived, or explicitly flagged as a gap",
+        "Each gap has a documented workaround or an accepted-limitation note",
+        "Mapping table is versioned in the repo and machine-readable",
+        "Mapping validated against a real sample export from Cloudability"
+      ]
+    },
+    {
+      "id": "FIN-5", "title": "Specify custom x_ columns (data dictionary)", "epic": "FOC", "status": "done", "priority": "Medium", "points": 3, "depends": ["FIN-1", "FIN-4"],
+      "description": "Define the Scotiabank-specific columns appended to FOCUS: x_ConsumptionType, x_SharedCost_*, x_PlatformId and x_PlatformName, x_PortfolioId and x_PortfolioName, x_ExchangeRate, and the x_BusinessUnit_* family (Department, SVP, VP, DP, Director, Team, Owner, Creator, User, ChargebackCostCenter). Also define the downstream-populated Allocated* columns.",
+      "acceptance": [
+        "Data dictionary lists type, nullability, source and derivation rule for every x_ column",
+        "AllocatedMethodId, AllocatedMethodDetails, AllocatedResourceId, AllocatedResourceName and AllocatedTags are defined as populated by the allocation engine",
+        "No x_ column collides with a reserved FOCUS name",
+        "Dictionary reviewed and approved by the FinOps lead"
+      ]
+    },
+    {
+      "id": "FIN-6", "title": "Derive business unit hierarchy from Cloudability tags", "epic": "FOC", "status": "progress", "priority": "High", "points": 5, "depends": ["FIN-5"],
+      "description": "Populate the x_BusinessUnit_* fields from Cloudability tags and categories (tag2, tag5, tag8, tag12, tag14, tag15, tag17, tag22, tag23, tag35, category17-19, category22), applying documented fallback rules such as x_VP using tag5 and falling back to category17. Validate every derived value against the master file.",
+      "acceptance": [
+        "Precedence and fallback rule documented for every x_BusinessUnit_* field",
+        "Derived values validated against the master file; mismatches written to an exception output with a reason code",
+        "Share of cost rows resolving to a business unit is measured and reported (proposed target 95%, to be agreed)",
+        "Unit tests cover each fallback path and a row with every tag missing"
+      ]
+    },
+    {
+      "id": "FIN-7", "title": "Lambda: extract Cloudability v3 cost data to S3 as FOCUS CSV", "epic": "ING", "status": "review", "priority": "High", "points": 8, "depends": ["FIN-4", "FIN-5"],
+      "description": "AWS Lambda that authenticates to the Cloudability v3 reporting API, pulls cost data for AWS, Azure, GCP and OCI, transforms each row to FOCUS v1.4 plus x_ columns, and writes CSV files to the output S3 bucket for Databricks. Failures are isolated per row and per platform so one bad record or platform does not stop the run.",
+      "acceptance": [
+        "Writes FOCUS v1.4 CSV with the agreed x_ columns for each of the four platforms",
+        "Downstream-populated Allocated* columns are written as empty strings",
+        "Returns HTTP 200 for full success, 207 for partial success and 500 when no rows were processed",
+        "A bad row or a failing platform is logged with context and skipped without aborting the run",
+        "Code review approved; endpoint and report parameters confirmed under FIN-9 before production"
+      ]
+    },
+    {
+      "id": "FIN-8", "title": "Secrets Manager integration and environment configuration", "epic": "ING", "status": "review", "priority": "Medium", "points": 3, "depends": [],
+      "description": "Fetch the Cloudability API key from AWS Secrets Manager, supporting both a raw string secret and a JSON-formatted secret. All configuration comes from environment variables: OUTPUT_BUCKET, CLOUDABILITY_SECRET_NAME and CLOUDABILITY_API_BASE.",
+      "acceptance": [
+        "Both secret formats are parsed correctly and covered by tests",
+        "Missing or malformed configuration fails fast with a clear error message",
+        "No secret value appears in code, logs or error output",
+        "Lambda execution role grants only the required secret read and bucket write permissions"
+      ]
+    },
+    {
+      "id": "FIN-9", "title": "Confirm Cloudability report configuration", "epic": "ING", "status": "todo", "priority": "High", "points": 2, "depends": ["FIN-7"],
+      "description": "Confirm the Cloudability API endpoint URL, dimensions, metrics, tag and category fields, and date range against the actual saved report configuration. Until this is done the Lambda defaults are placeholders and must not be used in production.",
+      "acceptance": [
+        "Report definition recorded in the repo and signed off by the Cloudability administrator",
+        "Lambda parameters match the confirmed report exactly",
+        "Totals from a pull for one closed month match the Cloudability console within the agreed tolerance",
+        "Tag and category fields required by FIN-6 are confirmed present in the output"
+      ]
+    },
+    {
+      "id": "FIN-10", "title": "Pagination, rate limiting and retry handling for the Cloudability API", "epic": "ING", "status": "todo", "priority": "Medium", "points": 5, "depends": ["FIN-7"],
+      "description": "Make the extractor safe for full-month pulls: follow pagination to the last page, back off on throttling responses, retry transient failures with a bounded policy, and avoid duplicate rows when a retry overlaps a page.",
+      "acceptance": [
+        "A full month is retrieved across all pages with row count equal to the API-reported total",
+        "Throttling and 5xx responses trigger exponential backoff with a retry cap",
+        "Retries never produce duplicate rows in the output",
+        "Behaviour covered by tests using mocked API responses"
+      ]
+    },
+    {
+      "id": "FIN-11", "title": "GCP cost ingestion and FOCUS output via PySpark Medallion", "epic": "FOC", "status": "progress", "priority": "High", "points": 8, "depends": ["FIN-4", "FIN-5"],
+      "description": "Python/PySpark pipeline that takes GCP costs from Cloudability CSV exports through Bronze, Silver, Gold and the FinOps Hub, producing FOCUS-compliant CSVs loaded into Databricks. Developed on branch feat/gcp-cost-allocation.",
+      "acceptance": [
+        "Bronze, Silver, Gold and Hub stages run end to end on a real GCP export",
+        "Output CSV passes the FOCUS schema validator (FIN-15)",
+        "Row counts and total cost reconcile between source and output",
+        "Untagged rows are retained and routed to the exception output, not dropped",
+        "Pull request reviewed and approved"
+      ]
+    },
+    {
+      "id": "FIN-12", "title": "AWS cost conversion to FOCUS v1.4", "epic": "FOC", "status": "todo", "priority": "High", "points": 8, "depends": ["FIN-4", "FIN-5"],
+      "description": "Convert AWS cost rows to FOCUS v1.4, handling amortized commitment discounts (Savings Plans and Reserved Instances), marketplace charges, credits, refunds and tax, and AWS account to portfolio ownership through tags.",
+      "acceptance": [
+        "BilledCost, EffectiveCost and ContractedCost follow the FOCUS definitions for commitment discounts",
+        "Marketplace, credit, refund and tax rows are classified with the correct ChargeCategory",
+        "Totals reconcile to the Cloudability console for a closed month",
+        "Output passes the FOCUS schema validator"
+      ]
+    },
+    {
+      "id": "FIN-13", "title": "Azure cost conversion to FOCUS v1.4", "epic": "FOC", "status": "backlog", "priority": "Medium", "points": 5, "depends": ["FIN-12"],
+      "description": "Convert Azure rows to FOCUS v1.4, mapping subscription and resource group to the account fields, handling reservation amortization and Azure-specific tag casing and inheritance.",
+      "acceptance": [
+        "Subscription and resource group map to SubAccountId and SubAccountName per the mapping table",
+        "Reservation purchases and usage are not double counted",
+        "Tag keys are matched case-insensitively and normalized",
+        "Totals reconcile to the Cloudability console for a closed month"
+      ]
+    },
+    {
+      "id": "FIN-14", "title": "OCI cost conversion to FOCUS v1.4", "epic": "FOC", "status": "backlog", "priority": "Low", "points": 5, "depends": ["FIN-12"],
+      "description": "Convert Oracle Cloud Infrastructure rows to FOCUS v1.4, mapping compartments to the account hierarchy and agreeing how untagged compartments receive an owner.",
+      "acceptance": [
+        "Compartment hierarchy maps to the account fields with a documented rule",
+        "Rows with no owner are flagged and routed to the exception output",
+        "Totals reconcile to the Cloudability console for a closed month",
+        "Output passes the FOCUS schema validator"
+      ]
+    },
+    {
+      "id": "FIN-15", "title": "FOCUS v1.4 schema validator", "epic": "FOC", "status": "todo", "priority": "Medium", "points": 3, "depends": ["FIN-4", "FIN-5"],
+      "description": "Reusable validation step that checks any output file for required columns, data types, nullability, allowed values and the x_ column rules, and fails the run with a precise report when a file does not conform.",
+      "acceptance": [
+        "Checks column presence, order-independent types, nullability and allowed values for FOCUS and x_ columns",
+        "A deliberately broken file fails with a message naming the column and row range",
+        "Runs as a pipeline step and in CI against sample files",
+        "Validation report is written next to the output"
+      ]
+    },
+    {
+      "id": "FIN-16", "title": "Unblock Databricks network egress (firewall whitelist)", "epic": "OPS", "status": "todo", "priority": "High", "points": 3, "blocked": "Waiting on firewall and networking meeting", "depends": [],
+      "description": "Databricks workspace finops-rnd-prod needs outbound HTTPS to the GCP APIs, Cloudability and GitHub. Hold the firewall and networking meeting, raise the requests, and prove connectivity from a cluster.",
+      "acceptance": [
+        "Meeting held and a request raised with the network team for each required endpoint",
+        "Allowed endpoints listed in the repo docs with the business justification",
+        "A test notebook succeeds against each endpoint from a cluster in finops-rnd-prod",
+        "No broader egress than the approved list is requested"
+      ]
+    },
+    {
+      "id": "FIN-17", "title": "S3 landing zone layout, encryption and lifecycle", "epic": "MED", "status": "todo", "priority": "Medium", "points": 3, "depends": ["FIN-8"],
+      "description": "Define the bucket layout the Lambda writes to and Databricks reads from: prefixes by platform, billing period and run id, server-side encryption, bucket policy, versioning and retention.",
+      "acceptance": [
+        "Prefix convention documented and used by the Lambda output",
+        "Encryption at rest enabled and public access blocked",
+        "Retention and lifecycle rules defined and applied",
+        "Reruns for the same period are idempotent and never leave mixed run output"
+      ]
+    },
+    {
+      "id": "FIN-18", "title": "Bronze layer: raw ingestion into Delta", "epic": "MED", "status": "todo", "priority": "High", "points": 5, "depends": ["FIN-16", "FIN-17"],
+      "description": "Ingest the FOCUS CSVs from S3 into Bronze Delta tables exactly as received, adding ingestion metadata (source file, load timestamp, run id). Bronze is append-only and is never edited.",
+      "acceptance": [
+        "Each CSV is loaded once; reprocessing a file does not create duplicates",
+        "Source file name, load time and run id are stored on every row",
+        "Malformed rows land in a quarantine table with the parse error",
+        "Row count in Bronze equals row count in the source files for the period"
+      ]
+    },
+    {
+      "id": "FIN-19", "title": "Silver layer: cleanse and conform to FOCUS", "epic": "MED", "status": "backlog", "priority": "High", "points": 5, "depends": ["FIN-18", "FIN-15"],
+      "description": "Standardize types, remove duplicates, align billing periods, apply x_ExchangeRate for currency normalization, and enforce the FOCUS schema. Rows that fail rules go to quarantine with a reason rather than being dropped.",
+      "acceptance": [
+        "Silver tables pass the FOCUS schema validator",
+        "Duplicates are removed deterministically and counted in the run summary",
+        "Currency conversion uses x_ExchangeRate and is reproducible for a given period",
+        "Quarantined rows carry a reason code and are included in reconciliation"
+      ]
+    },
+    {
+      "id": "FIN-20", "title": "Gold layer: allocation-ready cost facts", "epic": "MED", "status": "backlog", "priority": "High", "points": 5, "depends": ["FIN-19", "FIN-21"],
+      "description": "Join Silver cost rows with the master data (department lookup, platform and portfolio definitions) into a single Gold fact table that has every attribute the allocation engine needs, partitioned by billing period.",
+      "acceptance": [
+        "One row per cost line with owner, platform and portfolio attributes attached where known",
+        "Join misses are counted and listed, not silently dropped",
+        "Table is partitioned by billing period and performs within the agreed run time",
+        "Total cost in Gold equals total cost in Silver"
+      ]
+    },
+    {
+      "id": "FIN-21", "title": "Master data: department lookup and cost center master file", "epic": "ALL", "status": "todo", "priority": "High", "points": 5, "depends": ["FIN-6"],
+      "description": "Own and populate the lookup files the pipeline depends on. department_lookup.csv currently needs manual entries for rows with no tags, the largest being the GCP NetApp Intelligent Services charge shown as Use of cloud-manager-for-cloud. Set up a repeatable way to keep the files current.",
+      "acceptance": [
+        "Owner for the Use of cloud-manager-for-cloud charge identified and the row mapped",
+        "Lookup and master files are versioned in the repo with a documented update process",
+        "Pipeline reports any cost line whose owner cannot be resolved from the lookup",
+        "Unassigned cost after lookup is below the agreed threshold"
+      ]
+    },
+    {
+      "id": "FIN-22", "title": "Direct cost allocation", "epic": "ALL", "status": "todo", "priority": "High", "points": 8, "depends": ["FIN-20", "FIN-21"],
+      "description": "Allocate costs of type direct to the owning business unit using the tags the cloud resource carries. Allocation tags come from client_chargeback_centre, resource_client_chargeback_cost_center, project_id, application_id, resource_project_id and user_id, and are written to AllocatedTags.",
+      "acceptance": [
+        "Direct rows are assigned using the documented tag precedence",
+        "AllocatedTags records which tags were used for each row",
+        "Rows with no usable tag are routed to the exception output",
+        "Direct total before allocation equals direct total after allocation"
+      ]
+    },
+    {
+      "id": "FIN-23", "title": "Shared cost allocation (cost follows cost)", "epic": "ALL", "status": "backlog", "priority": "High", "points": 8, "depends": ["FIN-22"],
+      "description": "Distribute account-level shared costs across consuming accounts in proportion to each account's share of total measured usage for the billing period. Populate the x_SharedCost_* columns so the calculation can be audited.",
+      "acceptance": [
+        "Shares for a period sum to exactly 100 percent",
+        "x_SharedCost_* columns store the pool, the basis and the share applied",
+        "A period with zero measured usage is handled by a documented rule",
+        "Rounding remainder is assigned deterministically so totals still tie out"
+      ]
+    },
+    {
+      "id": "FIN-24", "title": "Proportional consumption types (propaws, propres, propgcp, propedp, propazure)", "epic": "ALL", "status": "backlog", "priority": "Medium", "points": 8, "depends": ["FIN-23"],
+      "description": "Implement the proportional allocation methods for each consumption type. Each type spreads its cost pool using its own driver, and the method used is recorded in AllocatedMethodId and AllocatedMethodDetails.",
+      "acceptance": [
+        "Each of the five types has a documented driver and is implemented",
+        "AllocatedMethodId and AllocatedMethodDetails identify the method on every allocated row",
+        "Each type's pool total is unchanged by allocation",
+        "Unit tests cover each type with a small worked example"
+      ]
+    },
+    {
+      "id": "FIN-25", "title": "Platform and portfolio allocation", "epic": "ALL", "status": "backlog", "priority": "High", "points": 5, "depends": ["FIN-24"],
+      "description": "Assign x_PlatformId and x_PlatformName and x_PortfolioId and x_PortfolioName, then roll platform costs down to the portfolios that consume the platform, following the hierarchy from FIN-1.",
+      "acceptance": [
+        "Every cost row carries a platform or an explicit none, and a portfolio",
+        "Platform cost is fully distributed to portfolios with no remainder",
+        "Portfolio totals can be traced back to platform and shared cost components",
+        "Output matches the hand-calculated example agreed with the FinOps lead"
+      ]
+    },
+    {
+      "id": "FIN-26", "title": "Business unit chargeback rollup", "epic": "ALL", "status": "backlog", "priority": "High", "points": 5, "depends": ["FIN-25"],
+      "description": "Roll portfolio costs to business units and populate x_BusinessUnit_* including ChargebackCostCenter, producing the final chargeback records for every portfolio.",
+      "acceptance": [
+        "Every portfolio has chargeback lines to a cost center",
+        "Chargeback records carry the full x_BusinessUnit_* hierarchy",
+        "Business unit totals equal portfolio totals for the period",
+        "Output is available at month-to-date and month-end grain"
+      ]
+    },
+    {
+      "id": "FIN-27", "title": "Allocation lineage: method id and Cloudability tag33 mapping", "epic": "ALL", "status": "backlog", "priority": "Medium", "points": 3, "depends": ["FIN-22"],
+      "description": "Map AllocatedMethodId to the Cloudability tag33 values so each allocation can be traced to its method, and populate AllocatedResourceId and AllocatedResourceName where the original resource is known.",
+      "acceptance": [
+        "Mapping from tag33 values to method ids is documented and tested",
+        "Unknown tag33 values are reported and not defaulted silently",
+        "AllocatedResourceId and AllocatedResourceName are populated when the source resource is known",
+        "An auditor can follow any chargeback line back to its source rows"
+      ]
+    },
+    {
+      "id": "FIN-28", "title": "Cost neutrality reconciliation", "epic": "VAL", "status": "backlog", "priority": "High", "points": 5, "depends": ["FIN-20", "FIN-26"],
+      "description": "Automated checks that total cost in equals total cost out at every stage: source to Bronze, Bronze to Silver, Silver to Gold, and Gold to final chargeback. A breach stops publication of the period.",
+      "acceptance": [
+        "Check runs after every stage and compares totals by platform and billing period",
+        "Tolerance is explicit (target zero after rounding) and configurable",
+        "A breach fails the run and publishes nothing downstream",
+        "Reconciliation summary is stored with the run for audit"
+      ]
+    },
+    {
+      "id": "FIN-29", "title": "Unallocated and untagged cost exception report", "epic": "ALL", "status": "backlog", "priority": "Medium", "points": 5, "depends": ["FIN-22"],
+      "description": "Report listing cost that could not be allocated or lacks required tags, ranked by amount with the account, service and suggested owner, so the largest gaps are fixed first.",
+      "acceptance": [
+        "Report lists unallocated cost by amount with account, service and reason code",
+        "Trend of unallocated percentage per month is available",
+        "Report is produced automatically each run",
+        "Owners can use it to fix tags or lookup entries and see the effect on the next run"
+      ]
+    },
+    {
+      "id": "FIN-30", "title": "REST API: raw and shared cost queries", "epic": "API", "status": "backlog", "priority": "Medium", "points": 8, "depends": ["FIN-20", "FIN-23"],
+      "description": "Implement POST /api/raw/query to return unallocated source records and POST /api/shared/query to return allocated shared-cost records, with filtering by billing period, platform, account and portfolio.",
+      "acceptance": [
+        "Both endpoints accept filters in the request body and return FOCUS-shaped records",
+        "Large results are paginated",
+        "Invalid filters return a clear 400 response",
+        "Endpoints require authentication and are covered by integration tests"
+      ]
+    },
+    {
+      "id": "FIN-31", "title": "REST API: platforms and portfolios", "epic": "API", "status": "backlog", "priority": "Medium", "points": 5, "depends": ["FIN-25"],
+      "description": "Implement GET /api/platforms, GET /api/platforms/{platformId}, GET /api/portfolios and GET /api/portfolios/{portfolioId}, returning allocated totals and cost components.",
+      "acceptance": [
+        "List and detail endpoints return consistent shapes",
+        "Unknown ids return 404",
+        "Totals match the Gold and chargeback tables for the same period",
+        "Endpoints are authenticated and tested"
+      ]
+    },
+    {
+      "id": "FIN-32", "title": "REST API: month-to-date and previous-month file exports", "epic": "API", "status": "backlog", "priority": "Medium", "points": 3, "depends": ["FIN-26"],
+      "description": "Implement GET /api/files/month-to-date and GET /api/files/previous-month, returning the final FOCUS CSV for the requested period.",
+      "acceptance": [
+        "Month-to-date file refreshes on each pipeline run",
+        "Previous-month file is frozen once the month is closed and signed off",
+        "Files pass the FOCUS schema validator",
+        "Access is limited to authorized consumers"
+      ]
+    },
+    {
+      "id": "FIN-33", "title": "Power BI semantic model and chargeback reports", "epic": "API", "status": "backlog", "priority": "High", "points": 8, "depends": ["FIN-26"],
+      "description": "Build the reporting layer on the final chargeback data: a semantic model and reports by business unit, portfolio, platform and application, with drill-through from chargeback line to source cost.",
+      "acceptance": [
+        "Report totals equal the chargeback table totals for the period",
+        "Users can drill from business unit to portfolio to platform to application",
+        "Month-to-date and closed-month views are both available",
+        "Row-level security limits each owner to their portfolios",
+        "Refresh runs after each successful pipeline run"
+      ]
+    },
+    {
+      "id": "FIN-34", "title": "Orchestration and scheduling", "epic": "OPS", "status": "backlog", "priority": "Medium", "points": 5, "depends": ["FIN-18", "FIN-7"],
+      "description": "Schedule the Lambda extraction and the Databricks workflow in order: daily month-to-date runs and a month-end close run, with dependencies so Databricks only starts after the files have landed.",
+      "acceptance": [
+        "Lambda schedule and Databricks workflow run in the correct order",
+        "A failed upstream step prevents downstream steps from running",
+        "Month-end close can be re-run for a past period without side effects",
+        "Schedule and run order are documented"
+      ]
+    },
+    {
+      "id": "FIN-35", "title": "Monitoring, logging and alerting", "epic": "OPS", "status": "backlog", "priority": "Medium", "points": 5, "depends": ["FIN-34"],
+      "description": "Structured logs and alerts for every stage, including an alert on Lambda 207 partial-success results, schema validation failures, reconciliation breaches and runs that did not finish by the expected time.",
+      "acceptance": [
+        "Every stage logs row counts, duration and a run id",
+        "Alerts fire for 207 and 500 results, validation failures and reconciliation breaches",
+        "An alert contains enough context to find the failing platform or file",
+        "Alerts are tested once by forcing a failure"
+      ]
+    },
+    {
+      "id": "FIN-36", "title": "CI/CD, automated tests and code review workflow", "epic": "OPS", "status": "todo", "priority": "Medium", "points": 5, "depends": [],
+      "description": "Set up automated tests and linting that run on every pull request, a branch and review process, and a repeatable deployment for the Lambda and the Databricks code.",
+      "acceptance": [
+        "Pull requests run linting and unit tests automatically and must pass before merge",
+        "Sample FOCUS files are used for regression tests of the transforms",
+        "Deployment of Lambda and Databricks code is scripted and repeatable",
+        "Branch and review rules are written in the repo README"
+      ]
+    },
+    {
+      "id": "FIN-37", "title": "Access control and data governance", "epic": "OPS", "status": "backlog", "priority": "Medium", "points": 3, "depends": ["FIN-18"],
+      "description": "Define who can read raw cost data, who can run the pipeline, and who can see chargeback data per portfolio. Apply the rules in Databricks, S3, the API and Power BI.",
+      "acceptance": [
+        "Roles defined for engineers, FinOps analysts and portfolio owners",
+        "Databricks table access and S3 policies reflect the roles",
+        "API and Power BI enforce the same visibility rules",
+        "Access review procedure documented"
+      ]
+    },
+    {
+      "id": "FIN-38", "title": "Parallel run and reconciliation against Apptio TBM Studio", "epic": "VAL", "status": "backlog", "priority": "High", "points": 8, "depends": ["FIN-28", "FIN-33"],
+      "description": "Run the new pipeline alongside Apptio TBM Studio for at least two closed months and explain every material variance by portfolio and business unit.",
+      "acceptance": [
+        "Two closed months compared at portfolio and business unit level",
+        "Every variance above the agreed threshold has a documented cause",
+        "Defects found are fixed or accepted by the FinOps lead",
+        "Final variance report approved"
+      ]
+    },
+    {
+      "id": "FIN-39", "title": "Documentation and runbooks", "epic": "VAL", "status": "backlog", "priority": "Medium", "points": 3, "depends": ["FIN-34"],
+      "description": "Write the operator and developer documentation: architecture overview, how to run and re-run a period, how to add a platform, how to update lookup files, and how to respond to each alert.",
+      "acceptance": [
+        "README explains the project, setup and how to run each stage",
+        "Runbook covers month-end close, rerun, rollback and every alert",
+        "Instructions for updating lookup and master files are included",
+        "A new team member follows the docs to run a sample period"
+      ]
+    },
+    {
+      "id": "FIN-40", "title": "User acceptance testing and Apptio cutover", "epic": "VAL", "status": "backlog", "priority": "High", "points": 5, "depends": ["FIN-38", "FIN-39"],
+      "description": "Walk portfolio owners through their chargeback numbers, collect sign-off, switch chargeback reporting to the new pipeline, and plan the retirement of Apptio TBM Studio.",
+      "acceptance": [
+        "Portfolio owners review and sign off their chargeback numbers",
+        "Cutover date and rollback plan agreed",
+        "First production month-end close completed on the new pipeline",
+        "Apptio decommission plan documented with the date and owner"
+      ]
+    }
+  ]
+}
